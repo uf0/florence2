@@ -26,12 +26,27 @@ async function loadImageToCanvas(file) {
 /**
  * Crop a region from canvas and return as blob
  * @param {HTMLCanvasElement} sourceCanvas - Source canvas
- * @param {Object} bbox - Bounding box {xmin, ymin, xmax, ymax}
+ * @param {Object} bbox - Bounding box {xmin, ymin, xmax, ymax} or {x1, y1, x2, y2, x3, y3, x4, y4} for quad box
  * @param {number} imageWidth - Original image width
  * @param {number} imageHeight - Original image height
  * @returns {Promise<Blob>}
  */
 async function cropRegion(sourceCanvas, bbox, imageWidth, imageHeight) {
+    // Check if this is a quad box (8 coordinates) or regular bbox (4 coordinates)
+    if ('x1' in bbox && 'y1' in bbox && 'x2' in bbox && 'y2' in bbox && 
+        'x3' in bbox && 'y3' in bbox && 'x4' in bbox && 'y4' in bbox) {
+        // Quad box format - find bounding rectangle
+        const xs = [bbox.x1, bbox.x2, bbox.x3, bbox.x4];
+        const ys = [bbox.y1, bbox.y2, bbox.y3, bbox.y4];
+        const xmin = Math.min(...xs);
+        const xmax = Math.max(...xs);
+        const ymin = Math.min(...ys);
+        const ymax = Math.max(...ys);
+        
+        // Convert to regular bbox and continue
+        return cropRegion(sourceCanvas, { xmin, ymin, xmax, ymax }, imageWidth, imageHeight);
+    }
+    
     const { xmin, ymin, xmax, ymax } = bbox;
     
     // Clamp coordinates to image boundaries
@@ -85,12 +100,33 @@ export function parseCSV(csvContent) {
     const data = [];
     
     for (let i = 1; i < lines.length; i++) {
-        const values = lines[i].split(',').map(v => v.trim());
+        // Handle quoted values that may contain commas
+        const values = [];
+        let current = '';
+        let inQuotes = false;
+        
+        for (let j = 0; j < lines[i].length; j++) {
+            const char = lines[i][j];
+            if (char === '"') {
+                inQuotes = !inQuotes;
+            } else if (char === ',' && !inQuotes) {
+                values.push(current.trim());
+                current = '';
+            } else {
+                current += char;
+            }
+        }
+        values.push(current.trim());
+        
         const obj = {};
         headers.forEach((header, index) => {
             const value = values[index];
-            // Try to parse numbers
-            obj[header] = isNaN(value) ? value : parseFloat(value);
+            // Try to parse numbers (including decimals and negatives)
+            if (value && !isNaN(value)) {
+                obj[header] = parseFloat(value);
+            } else {
+                obj[header] = value;
+            }
         });
         data.push(obj);
     }
@@ -125,8 +161,8 @@ export async function cropAndSaveImagesStreaming(csvData, imageFiles, outputDirH
         imageMap[file.name] = file;
     });
     
-    // Create label subdirectories cache
-    const labelDirHandles = {};
+    // Create image subdirectories cache
+    const imageDirHandles = {};
     
     const totalImages = Object.keys(groupedData).length;
     let processedImages = 0;
@@ -160,24 +196,49 @@ export async function cropAndSaveImagesStreaming(csvData, imageFiles, outputDirH
                 }
                 
                 try {
-                    const blob = await cropRegion(canvas, {
-                        xmin: bbox.xmin,
-                        ymin: bbox.ymin,
-                        xmax: bbox.xmax,
-                        ymax: bbox.ymax
-                    }, width, height);
+                    // Determine bbox format and prepare coordinates
+                    let bboxCoords;
+                    if ('x1' in bbox && 'y1' in bbox && 'x2' in bbox && 'y2' in bbox && 
+                        'x3' in bbox && 'y3' in bbox && 'x4' in bbox && 'y4' in bbox) {
+                        // Quad box format
+                        bboxCoords = {
+                            x1: bbox.x1,
+                            y1: bbox.y1,
+                            x2: bbox.x2,
+                            y2: bbox.y2,
+                            x3: bbox.x3,
+                            y3: bbox.y3,
+                            x4: bbox.x4,
+                            y4: bbox.y4
+                        };
+                    } else if ('xmin' in bbox && 'ymin' in bbox && 'xmax' in bbox && 'ymax' in bbox) {
+                        // Regular bbox format
+                        bboxCoords = {
+                            xmin: bbox.xmin,
+                            ymin: bbox.ymin,
+                            xmax: bbox.xmax,
+                            ymax: bbox.ymax
+                        };
+                    } else {
+                        console.warn(`Unknown bbox format for ${filename} index ${index}:`, bbox);
+                        skipped++;
+                        continue;
+                    }
                     
-                    const label = bbox.label || 'unknown';
+                    const blob = await cropRegion(canvas, bboxCoords, width, height);
+                    
                     const baseFilename = filename.split('.')[0];
-                    const croppedFilename = `${baseFilename}_${index}.jpg`;
+                    // Use ID from CSV if available, otherwise use index
+                    const imageId = bbox.id !== undefined ? bbox.id : index;
+                    const croppedFilename = `${baseFilename}_${imageId}.jpg`;
                     
-                    // Get or create label subdirectory
-                    if (!labelDirHandles[label]) {
-                        labelDirHandles[label] = await outputDirHandle.getDirectoryHandle(label, { create: true });
+                    // Get or create image subdirectory
+                    if (!imageDirHandles[baseFilename]) {
+                        imageDirHandles[baseFilename] = await outputDirHandle.getDirectoryHandle(baseFilename, { create: true });
                     }
                     
                     // Save immediately
-                    const fileHandle = await labelDirHandles[label].getFileHandle(croppedFilename, { create: true });
+                    const fileHandle = await imageDirHandles[baseFilename].getFileHandle(croppedFilename, { create: true });
                     const writable = await fileHandle.createWritable();
                     await writable.write(blob);
                     await writable.close();

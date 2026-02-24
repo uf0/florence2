@@ -102,7 +102,7 @@ function App() {
         case 'batch-result':
           // Write single result to streaming writer
           if (streamingWriter.current) {
-            streamingWriter.current.writeResult({
+            const writePromise = streamingWriter.current.writeResult({
               filename: e.data.filename,
               result: e.data.result,
               rawResult: e.data.rawResult,
@@ -111,6 +111,8 @@ function App() {
             }).catch(err => {
               console.error('Error writing result:', err);
             });
+            // Track this write operation
+            streamingWriter.current.pendingWrites.push(writePromise);
           }
           break;
 

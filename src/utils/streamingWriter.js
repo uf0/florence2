@@ -11,6 +11,7 @@ export class StreamingJSONWriter {
         this.fileHandle = fileHandle;
         this.writable = null;
         this.isFirst = true;
+        this.pendingWrites = []; // Track pending write promises
     }
 
     async initialize(task) {
@@ -19,6 +20,7 @@ export class StreamingJSONWriter {
         await this.writable.write('[\n');
         this.task = task;
         this.isFirst = true;
+        this.pendingWrites = [];
     }
 
     async writeResult(item) {
@@ -42,6 +44,8 @@ export class StreamingJSONWriter {
 
     async finalize() {
         if (!this.writable) return;
+        // Wait for all pending writes to complete
+        await Promise.all(this.pendingWrites);
         await this.writable.write('\n]\n');
         await this.writable.close();
         this.writable = null;
@@ -56,11 +60,15 @@ export class StreamingCSVWriter {
         this.fileHandle = fileHandle;
         this.writable = null;
         this.headers = null;
+        this.rowId = 0; // Track unique ID for each row
+        this.pendingWrites = []; // Track pending write promises
     }
 
     async initialize() {
         this.writable = await this.fileHandle.createWritable();
         this.headers = null;
+        this.rowId = 0;
+        this.pendingWrites = [];
     }
 
     async writeResult(item) {
@@ -68,12 +76,46 @@ export class StreamingCSVWriter {
 
         // Flatten the result
         const flatItems = [];
-        if (Array.isArray(item.result)) {
-            flatItems.push(...item.result);
+        
+        // Handle OCR_WITH_REGION format with quad_boxes
+        if (item.result && item.result.labels && item.result.quad_boxes) {
+            const { labels, quad_boxes } = item.result;
+            for (let i = 0; i < labels.length; i++) {
+                flatItems.push({
+                    id: this.rowId++,
+                    filename: item.filename,
+                    label: labels[i],
+                    x1: quad_boxes[i][0],
+                    y1: quad_boxes[i][1],
+                    x2: quad_boxes[i][2],
+                    y2: quad_boxes[i][3],
+                    x3: quad_boxes[i][4],
+                    y3: quad_boxes[i][5],
+                    x4: quad_boxes[i][6],
+                    y4: quad_boxes[i][7]
+                });
+            }
+        } else if (item.result && item.result.labels && item.result.bboxes) {
+            // Handle OD (Object Detection) format with bboxes
+            const { labels, bboxes } = item.result;
+            for (let i = 0; i < labels.length; i++) {
+                flatItems.push({
+                    id: this.rowId++,
+                    filename: item.filename,
+                    label: labels[i],
+                    xmin: bboxes[i][0],
+                    ymin: bboxes[i][1],
+                    xmax: bboxes[i][2],
+                    ymax: bboxes[i][3]
+                });
+            }
+        } else if (Array.isArray(item.result)) {
+            // Add ID to each item in array
+            flatItems.push(...item.result.map(r => ({ id: this.rowId++, ...r })));
         } else if (item.result && typeof item.result === 'object') {
-            flatItems.push({ filename: item.filename, result: JSON.stringify(item.result) });
+            flatItems.push({ id: this.rowId++, filename: item.filename, result: JSON.stringify(item.result) });
         } else {
-            flatItems.push({ filename: item.filename, result: item.result });
+            flatItems.push({ id: this.rowId++, filename: item.filename, result: item.result });
         }
 
         for (const flatItem of flatItems) {
@@ -98,6 +140,8 @@ export class StreamingCSVWriter {
 
     async finalize() {
         if (!this.writable) return;
+        // Wait for all pending writes to complete
+        await Promise.all(this.pendingWrites);
         await this.writable.close();
         this.writable = null;
     }
@@ -110,10 +154,12 @@ export class StreamingIndividualWriter {
     constructor(dirHandle) {
         this.dirHandle = dirHandle;
         this.task = null;
+        this.pendingWrites = []; // Track pending write promises
     }
 
     async initialize(task) {
         this.task = task;
+        this.pendingWrites = [];
     }
 
     async writeResult(item) {
@@ -134,7 +180,8 @@ export class StreamingIndividualWriter {
     }
 
     async finalize() {
-        // Nothing to finalize for individual files
+        // Wait for all pending writes to complete
+        await Promise.all(this.pendingWrites);
     }
 }
 
